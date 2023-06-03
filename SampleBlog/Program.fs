@@ -16,6 +16,8 @@ open Microsoft.IdentityModel.Tokens
 open System.Text
 open System.Security.Claims
 open Microsoft.AspNetCore.Authentication
+open Microsoft.AspNetCore.Authentication.Cookies
+open System.Runtime.CompilerServices
 
 // ---------------------------------
 // Models
@@ -35,36 +37,39 @@ type Post =
         Date : DateTime
     }
 
-// ---------
-// Token Stuff
-// ---------
 
-let secret = "testkey_this_needs_to_be_big_or_else_an_error_occurs"
+// ---------------------------------
+// Middleware
+// ---------------------------------
+type SampleBlogMiddleware (next : RequestDelegate,
+                           handler : HttpHandler,  //TODO figure out why when I remove this, authentication breaks
+                           loggerFactory : ILoggerFactory) =
+    let logger = loggerFactory.CreateLogger<SampleBlogMiddleware>()
 
-let authorize =
-    requiresAuthentication (challenge JwtBearerDefaults.AuthenticationScheme)
+    member __.Invoke(ctx : HttpContext) =
+        task {
+            let cookie = ctx.Request.Cookies["SampleBlogToken"]
+            logger.LogInformation($"Cookie {cookie}")
+            match ctx.GetCookieValue "SampleBlogToken" with
+            | None ->
+                logger.LogInformation("Could not find cookie")
+            | Some token -> 
+                logger.LogInformation("Could find cookie")
+                ctx.Request.Headers.Add("Authorization", $"Bearer {token}");
 
-// let notLoggedIn =
-//     RequestErrors.UNAUTHORIZED "Basic" "SampleBlog" "You are not authorized."
+            logger.LogInformation("Adding bearer token to authentication pipeline")
+            return! next.Invoke ctx
+        }
 
-// let checkToken (ctx: HttpContext) =
-//     match ctx.TryGetRequestHeader "X-Token" with
-//     | None -> false
-//     | Some headerValue -> headerValue = "483ca0cd-dc4f-4d91-81ea-b0b830be1d85"
+[<Extension>]
+type ApplicationBuilderMiddleware() =
+    [<Extension>]
+    static member UseCookieJwt
+        (builder: IApplicationBuilder, handler : HttpHandler) =
+        builder.UseMiddleware<SampleBlogMiddleware> handler |> ignore
+        builder
 
-let generateToken email =
-    let tokenHandler = new JwtSecurityTokenHandler()
-    let key = Encoding.ASCII.GetBytes(secret)
-    let mutable tokenDescriptor = new SecurityTokenDescriptor()
-    let claim = new Claim(ClaimTypes.Name, email)
-    let claims = [| claim |]
-    tokenDescriptor.Subject <- new ClaimsIdentity(claims)
-    tokenDescriptor.Expires <- System.Nullable(DateTime.UtcNow.AddMinutes(10.0))
-    tokenDescriptor.SigningCredentials <- new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
-    let token = tokenHandler.CreateToken(tokenDescriptor)
-    tokenHandler.WriteToken(token)
 
-//let requireToken = authorizeRequest checkToken notLoggedIn
 // ---------------------------------
 // Views
 // ---------------------------------
@@ -99,49 +104,21 @@ module Views =
             p [] [ encodedText model.Text ]
         ] |> layout
 
-(*
-<div class="field">
-  <label class="label">Name</label>
-  <div class="control">
-    <input class="input" type="text" placeholder="e.g Alex Smith">
-  </div>
-</div>
 
-<div class="field">
-  <label class="label">Email</label>
-  <div class="control">
-    <input class="input" type="email" placeholder="e.g. alexsmith@gmail.com">
-  </div>
-</div>
-*)
-    let index (post: Message) =
-        let pageTitle = "Login"
+    let index =
+        let pageTitle = "Index"
 
         
         [ h1 [] [ str pageTitle ]
           div [] [
-            div [] [
-                label [ _for "email" ] [ str "Email" ]
-                input [ _id "email"
-                        _type "text"
-                        _name "email" ]
-            ]
-            div [] [
-                label [ _for "password" ] [
-                    str "Password"
-                ]
-                input [ _id "password"
-                        _type "password"
-                        _name "password" ]
-            ]
-            div [] [ input [ _type "submit" ] ]
+            p [] [ str "This is the home page" ]
 
           ] ]
         |> layout
     
     let login = 
         [ div [] [
-            h1 [] [ str "TestLogin" ]
+            h1 [] [ str "Login" ]
             p [] [ str "Any random password will be accepted" ]
             form [ _action "/login"; _method "post" ] [
                 div [ _class "field" ] [
@@ -171,27 +148,39 @@ module Views =
               str "Thank you for submitting login stuff"
           ] ]
         |> layout
-    // let logIn =
-    //     [
-    //         div [] [
-    //             label [ _for "label" ] [ str "Username" ]
-    //             input [ _type "text" _name "text" ]
-    //         ]
-    //     ] |> layout
+
+// ---------
+// Token Stuff
+// ---------
+
+let secret = "testkey_this_needs_to_be_big_or_else_an_error_occurs"
+
+let generateToken email =
+    let tokenHandler = new JwtSecurityTokenHandler()
+    let key = Encoding.ASCII.GetBytes(secret)
+    let mutable tokenDescriptor = new SecurityTokenDescriptor()
+    let claim = new Claim(ClaimTypes.Name, email)
+    let claims = [| claim |]
+    tokenDescriptor.Subject <- new ClaimsIdentity(claims)
+    tokenDescriptor.Expires <- System.Nullable(DateTime.UtcNow.AddMinutes(10.0))
+    tokenDescriptor.SigningCredentials <- new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+    let token = tokenHandler.CreateToken(tokenDescriptor)
+    tokenHandler.WriteToken(token)
+
+let authorize = requiresAuthentication (challenge JwtBearerDefaults.AuthenticationScheme)
 
 // ---------------------------------
 // Web app
 // ---------------------------------
 
-let indexHandler (name : string) =
-    let greetings = sprintf "Hello %s, from Giraffe! Does Watch work?" name
-    let model     = { Text = greetings }
-    let view      = Views.index model
-    htmlView view
+let indexHandler =
+    htmlView Views.index
 
 let loginHandler: HttpHandler =
     // Do stuff
     htmlView Views.login
+
+
 
 let loginSubmitHandler: HttpHandler =
     fun (next: HttpFunc) (ctx: HttpContext) ->
@@ -207,8 +196,10 @@ let loginSubmitHandler: HttpHandler =
             
             ctx.Response.Cookies.Append("SampleBlogToken", token, cookieOptions);
 
+            //return! indexHandler next ctx
+            return! (redirectTo false "/") next ctx
             // Sends the object back to the client
-            return! ctx.WriteHtmlViewAsync(Views.loginSubmitView request)
+            //return! ctx.WriteHtmlViewAsync(Views.loginSubmitView request)
         }
 
 let loginRoutes: HttpHandler =
@@ -229,8 +220,8 @@ let webApp =
     choose [ route "/login" >=> loginRoutes
              authorize
              >=> choose [ 
-                    route "/" >=> indexHandler "world"
-                    routef "/hello/%s" indexHandler
+                    route "/" >=> indexHandler 
+                    //routef "/hello/%s" indexHandler
                     routeCi "/testauth" >=> text "you're authorized" ] ]
 // ---------------------------------
 // Error handler
@@ -262,6 +253,7 @@ let configureApp (app : IApplicationBuilder) =
         app .UseGiraffeErrorHandler(errorHandler)
             .UseHttpsRedirection())
         .UseCors(configureCors)
+        .UseCookieJwt(webApp)
         .UseAuthentication()
         .UseStaticFiles()
         .UseGiraffe(webApp)
